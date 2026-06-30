@@ -3,9 +3,10 @@
 Réplication Hamilton, Pruitt & Borger (2011, AEJ:Macro) — adaptation zone euro
 =============================================================================
 
-Système GMM à deux indicateurs (HICP Core flash, PMI) destiné à identifier le
-couple (beta, delta) de la règle de Taylor perçue par le marché, séparément
-pour chaque maturité OIS m in {1, 3, 6, 12} mois (1M, 3M, 6M, 1Y).
+Version mensuelle du système GMM à deux indicateurs (HICP Core flash, PMI)
+destiné à identifier le couple (beta, delta) de la règle de Taylor perçue par
+le marché, séparément pour chaque maturité OIS m in {1, 3, 6, 12} mois
+(1M, 3M, 6M, 1Y).
 
 Référence des équations : Hamilton, Pruitt & Borger (2011), Sections I-II,
 équations (5), (10)-(13).
@@ -24,6 +25,9 @@ HYPOTHÈSES STRUCTURANTES — À VALIDER EXPLICITEMENT AVANT TOUTE INTERPRÉTATI
      >>> Si votre df_ois_pmi est en réalité le PMI flash malgré une date de
      publication en début de mois, passez REF_MONTH_OFFSET['PMI'] = 0 et
      ré-inspectez inspect_reference_months() avant de relancer.
+   - GDP  : chaque publication est traitée comme un événement indépendant,
+     daté par son propre mois de publication. Si plusieurs publications
+     d'un même trimestre existent (A/P/F), elles restent distinctes.
 
 2. RESTRICTIONS DE PARCIMONIE DE L'ARTICLE (section II.B)
    Le retard y_{tau-2} est exclu de l'équation auxiliaire de pi, et le
@@ -31,13 +35,12 @@ HYPOTHÈSES STRUCTURANTES — À VALIDER EXPLICITEMENT AVANT TOUTE INTERPRÉTATI
    retards restent dans le vecteur d'instruments z_k, ce qui crée une
    restriction sur-identifiante testable, exactement comme dans l'article.
 
-3. PANEL MENSUEL RECTANGULAIRE
-   Le calcul HAC correct nécessite un index temporel commun aux deux
-   indicateurs (cf. zeta_t(h) dans l'article, qui empile TOUS les
-   indicateurs au même pas de temps mensuel). On restreint donc le panel
-   aux mois où LES DEUX indicateurs ont un événement valide. Étant donné vos
-   comptes (154 vs 155), ceci ne devrait faire perdre que quelques mois de
-   bord d'échantillon — à vérifier via le diagnostic imprimé.
+3. PANEL MENSUEL RECTANGULAIRE EMPILÉ
+   Le calcul HAC correct nécessite un index temporel commun aux différents
+   blocs d'indicateurs, mais on ne veut pas imposer une intersection vide.
+   On conserve donc chaque bloc d'indicateurs séparément, puis on empile les
+   moments au niveau des lignes valides de chaque bloc. Cela permet de garder
+   un maximum d'observations lorsque GDP est moins fréquent.
 =============================================================================
 """
 
@@ -48,6 +51,7 @@ from scipy.optimize import minimize
 from scipy.stats import chi2
 
 INDICATORS = ["HICP", "PMI", "GDP"]
+MONTHLY_INDICATORS = ["HICP", "PMI"]
 MATURITY_COL = {1: "OIS_1M", 3: "OIS_3M", 6: "OIS_6M", 12: "OIS_1Y"}
 MATURITY_COLS = {
     1: "OIS_1M_n",
@@ -184,11 +188,12 @@ def attach_monthly_series(events, df_series, value_col, out_prefix, lags=(), lea
     return out
 
 
-def build_event_table(df_ois, df_ois_pmi, df_inflation, df_output, ois_daily):
-    """Construit la table d'événements complète, avec contrôles et cibles."""
+def build_event_table(df_ois, df_ois_pmi, df_gdp, df_inflation, df_output, ois_daily):
+    """Construit la table d'événements mensuelle complète, avec contrôles et cibles."""
     ev_hicp = prepare_events(df_ois, "HICP")
     ev_pmi = prepare_events(df_ois_pmi, "PMI")
-    events = pd.concat([ev_hicp, ev_pmi], ignore_index=True)
+    ev_gdp = prepare_events(df_gdp, "GDP")
+    events = pd.concat([ev_hicp, ev_pmi, ev_gdp], ignore_index=True)
     events = events.sort_values("event_time").reset_index(drop=True)
 
     events = attach_monthly_series(
@@ -236,11 +241,12 @@ def inspect_reference_months(events, n=8):
 
 
 def build_monthly_panel(events, m):
-    """Panel mensuel unique combinant les deux indicateurs — nécessaire
-    pour un calcul HAC correct en présence de cibles communes
-    (pi_{tau+m}, y_{tau+m}) partagées par les deux blocs d'indicateurs.
-    Restreint aux mois où les DEUX indicateurs ont un événement valide
-    (cf. hypothèse 4 en tête de fichier)."""
+    """Panel mensuel empilé par indicateur.
+
+    Chaque bloc indicateur est conservé séparément, puis les lignes valides
+    sont empilées dans un seul panel. Cela permet d'inclure GDP sans perdre
+    les observations HICP/PMI par une intersection trop stricte.
+    """
     frames = []
     for indicator in INDICATORS:
         cols = [
@@ -269,13 +275,10 @@ def build_monthly_panel(events, m):
             }
         )
         sub = sub.dropna().drop_duplicates(subset="tau", keep="first")
-        frames.append(sub.set_index("tau"))
+        sub["indicator_block"] = indicator
+        frames.append(sub)
 
-    import functools
-
-    panel = functools.reduce(
-        lambda left, right: left.join(right, how="inner"), frames
-    ).sort_index()
+    panel = pd.concat(frames, ignore_index=True).sort_values(["tau", "indicator_block"])
     return panel
 
 
@@ -399,19 +402,23 @@ def compute_G(theta, panel, restrict_eta=True):
     """
     params, beta, delta, eta = unpack_theta(theta, restrict_eta)
     n = len(panel)
-    blocks = []
+    n_blocks = len(INDICATORS)
+    G = np.zeros((n, 18 * n_blocks))
 
-    for indicator in INDICATORS:
-        w = panel[f"w_{indicator}"].to_numpy()
-        wt = panel[f"wt_{indicator}"].to_numpy()
-        pilag = panel[f"pilag_{indicator}"].to_numpy()
-        ylag = panel[f"ylag_{indicator}"].to_numpy()
-        target_pi = panel[f"pitgt_{indicator}"].to_numpy()
-        target_y = panel[f"ytgt_{indicator}"].to_numpy()
-        d_ois = panel[f"dois_{indicator}"].to_numpy()
+    for j, indicator in enumerate(INDICATORS):
+        sub = panel[panel["indicator_block"] == indicator].copy()
+        if sub.empty:
+            continue
 
-        # niveau OIS pré-événement correspondant à la maturité courante
-        ois_level = panel[f"oislvl_{indicator}"].to_numpy()
+        w = sub[f"w_{indicator}"].to_numpy()
+        wt = sub[f"wt_{indicator}"].to_numpy()
+        pilag = sub[f"pilag_{indicator}"].to_numpy()
+        ylag = sub[f"ylag_{indicator}"].to_numpy()
+        target_pi = sub[f"pitgt_{indicator}"].to_numpy()
+        target_y = sub[f"ytgt_{indicator}"].to_numpy()
+        d_ois = sub[f"dois_{indicator}"].to_numpy()
+        ois_level = sub[f"oislvl_{indicator}"].to_numpy()
+        n = len(sub)
 
         z = np.column_stack([w, wt, pilag, ylag, ois_level, np.ones(n)])
 
@@ -440,11 +447,11 @@ def compute_G(theta, panel, restrict_eta=True):
         ois_hat = eta[indicator] + slope * (w - wt)
         resid_ois = d_ois - ois_hat
 
-        blocks.append(resid_pi[:, None] * z)
-        blocks.append(resid_y[:, None] * z)
-        blocks.append(resid_ois[:, None] * z)
+        block = np.column_stack([resid_pi[:, None] * z, resid_y[:, None] * z, resid_ois[:, None] * z])
+        cols = slice(j * 18, (j + 1) * 18)
+        G[panel["indicator_block"].eq(indicator).to_numpy(), cols] = block
 
-    return np.column_stack(blocks)
+    return G
 
 
 def gmm_objective(theta, panel, W, restrict_eta=True):
@@ -486,8 +493,9 @@ def warm_start_core(panel):
     fingerprints = {}
 
     for indicator in INDICATORS:
+        sub = panel[panel["indicator_block"] == indicator].copy()
         X_pi = sm.add_constant(
-            panel[
+            sub[
                 [
                     f"w_{indicator}",
                     f"wt_{indicator}",
@@ -496,10 +504,10 @@ def warm_start_core(panel):
                 ]
             ]
         )
-        ols_pi = sm.OLS(panel[f"pitgt_{indicator}"], X_pi).fit()
+        ols_pi = sm.OLS(sub[f"pitgt_{indicator}"], X_pi).fit()
 
         X_y = sm.add_constant(
-            panel[
+            sub[
                 [
                     f"w_{indicator}",
                     f"wt_{indicator}",
@@ -508,7 +516,7 @@ def warm_start_core(panel):
                 ]
             ]
         )
-        ols_y = sm.OLS(panel[f"ytgt_{indicator}"], X_y).fit()
+        ols_y = sm.OLS(sub[f"ytgt_{indicator}"], X_y).fit()
 
         gamma_pi = ols_pi.params[f"w_{indicator}"]
         xi_pi = ols_pi.params[f"wt_{indicator}"]
@@ -541,8 +549,9 @@ def warm_start_core(panel):
 
     naive_slopes = []
     for indicator in INDICATORS:
-        s = panel[f"w_{indicator}"] - panel[f"wt_{indicator}"]
-        ols_slope = sm.OLS(panel[f"dois_{indicator}"], sm.add_constant(s)).fit()
+        sub = panel[panel["indicator_block"] == indicator].copy()
+        s = sub[f"w_{indicator}"] - sub[f"wt_{indicator}"]
+        ols_slope = sm.OLS(sub[f"dois_{indicator}"], sm.add_constant(s)).fit()
         naive_slopes.append(ols_slope.params.iloc[1])
 
     A = np.array([fingerprints[k] for k in INDICATORS])
@@ -595,7 +604,7 @@ def estimate_gmm(panel, restrict_eta=True, n_restarts=5, perturb_scale=0.3, seed
     theta0 = np.concatenate([core0, np.zeros(n_eta)])
     assert len(theta0) == n_theta, (len(theta0), n_theta)
 
-    n_moments = 3 * 6 * len(INDICATORS)  # = 30
+    n_moments = 3 * 6 * len(INDICATORS)
 
     rng = np.random.default_rng(seed)
     candidates = [theta0]
@@ -699,7 +708,7 @@ def report_maturity(events, m, verbose=True):
         )
 
         dJ = fit_r["J_stat"] - fit_u["J_stat"]
-        df_cross = len(INDICATORS) - 1  # n_eta unrestricted - n_eta restricted(=1)
+        df_cross = len(INDICATORS) - 1
         p_cross = 1 - chi2.cdf(max(dJ, 0), df=df_cross)
         print(
             f"  Test restriction croisée (eta commun à {INDICATORS}) : "
@@ -709,8 +718,8 @@ def report_maturity(events, m, verbose=True):
     return fit_r, fit_u, panel
 
 
-def run_all_maturities(df_ois, df_ois_pmi, df_inflation, df_output, ois_daily):
-    events = build_event_table(df_ois, df_ois_pmi, df_inflation, df_output, ois_daily)
+def run_all_maturities(df_ois, df_ois_pmi, df_gdp, df_inflation, df_output, ois_daily):
+    events = build_event_table(df_ois, df_ois_pmi, df_gdp, df_inflation, df_output, ois_daily)
     inspect_reference_months(events)
 
     results = {}

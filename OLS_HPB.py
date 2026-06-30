@@ -142,9 +142,8 @@ def estimate_main_equation_daily(panel, gamma_pi, gamma_y, separate_intercepts=T
             }
         )
         # Indispensable depuis l'outer join : les mois où cet indicateur
-        # n'a pas d'événement (ex. GDP hors mois de publication) portent
-        # des NaN qu'il faut exclure ICI, bloc par bloc -- jamais via un
-        # dropna() global sur le panel avant l'étape 2.
+        # n'a pas d'événement portent des NaN qu'il faut exclure ICI,
+        # bloc par bloc -- jamais via un dropna() global sur le panel.
         block = block.dropna(subset=["d_ois", "X_pi", "X_y"])
         rows.append(block)
     stacked = pd.concat(rows, ignore_index=True)
