@@ -271,7 +271,11 @@ def build_monthly_panel(events, m):
         sub = sub.dropna().drop_duplicates(subset="tau", keep="first")
         frames.append(sub.set_index("tau"))
 
-    panel = frames[0].join(frames[1], how="inner").sort_index()
+    import functools
+
+    panel = functools.reduce(
+        lambda left, right: left.join(right, how="inner"), frames
+    ).sort_index()
     return panel
 
 
@@ -695,10 +699,11 @@ def report_maturity(events, m, verbose=True):
         )
 
         dJ = fit_r["J_stat"] - fit_u["J_stat"]
-        p_cross = 1 - chi2.cdf(max(dJ, 0), df=1)
+        df_cross = len(INDICATORS) - 1  # n_eta unrestricted - n_eta restricted(=1)
+        p_cross = 1 - chi2.cdf(max(dJ, 0), df=df_cross)
         print(
-            f"  Test restriction croisée (eta_HICP = eta_PMI) : "
-            f"dJ = {dJ:.2f}, p = {p_cross:.3f}"
+            f"  Test restriction croisée (eta commun à {INDICATORS}) : "
+            f"dJ = {dJ:.2f}, df = {df_cross}, p = {p_cross:.3f}"
         )
 
     return fit_r, fit_u, panel
@@ -804,7 +809,10 @@ def report_maturity_from_panel(panel, m, verbose=True):
             f"df={fit_r['df']}, p={fit_r['p_value']:.3f}"
         )
         dJ = fit_r["J_stat"] - fit_u["J_stat"]
-        p_cross = 1 - chi2.cdf(max(dJ, 0), df=1)
-        print(f"  Test restriction croisée : dJ={dJ:.2f}, p={p_cross:.3f}")
+        df_cross = len(INDICATORS) - 1  # n_eta unrestricted - n_eta restricted(=1)
+        p_cross = 1 - chi2.cdf(max(dJ, 0), df=df_cross)
+        print(
+            f"  Test restriction croisée : dJ={dJ:.2f}, df={df_cross}, p={p_cross:.3f}"
+        )
 
     return fit_r, fit_u, panel
