@@ -69,7 +69,7 @@ HORIZONS_M = [1, 3, 6, 12]
 
 HICP_SPILLOVER_CUTOFF = 5  # jour du mois au-delà duquel on ne suppose
 # plus de débordement du flash HICP sur M+1
-REF_MONTH_OFFSET = {"HICP": 0, "PMI": -1}  # cf. hypothèse 1 ci-dessus
+REF_MONTH_OFFSET = {"HICP": 0, "PMI": -1, "GDP": -1}  # cf. hypothèse 1 ci-dessus
 
 PI_LAG = 1  # pi_{tau-1} : connu des deux types d'événement
 Y_LAG = 2  # y_{tau-2}  : connu des deux types d'événement
@@ -334,7 +334,7 @@ def build_monthly_panel_daily(events, m, verbose_coverage=True):
             n_valid = panel[f"w_{indicator}"].notna().sum()
             print(
                 f"    couverture {indicator:5s} : {n_valid}/{n_tot} mois "
-                f"({100*n_valid/max(n_tot, 1):.0f}%)"
+                f"({100 * n_valid / max(n_tot, 1):.0f}%)"
             )
 
     if len(panel) < 40:
@@ -683,11 +683,11 @@ def report_maturity(events, m, verbose=True):
             print(f"    {k:5s} : {fit_r['fingerprints'][i]}")
         print(
             f"  beta_hat  = {beta_hat:8.3f}  (se = {se_beta:.3f}, "
-            f"t = {beta_hat/se_beta if se_beta > 0 else np.nan:.2f})"
+            f"t = {beta_hat / se_beta if se_beta > 0 else np.nan:.2f})"
         )
         print(
             f"  delta_hat = {delta_hat:8.3f}  (se = {se_delta:.3f}, "
-            f"t = {delta_hat/se_delta if se_delta > 0 else np.nan:.2f})"
+            f"t = {delta_hat / se_delta if se_delta > 0 else np.nan:.2f})"
         )
         print(
             f"  J-test (modèle restreint) : J = {fit_r['J_stat']:.2f}, "
@@ -793,8 +793,7 @@ def report_maturity_from_panel(panel, m, verbose=True):
         )
         for i, k in enumerate(INDICATORS):
             print(
-                f"  Empreinte {k:5s} (gamma_pi, gamma_y) = "
-                f"{fit_r['fingerprints'][i]}"
+                f"  Empreinte {k:5s} (gamma_pi, gamma_y) = {fit_r['fingerprints'][i]}"
             )
         t_b = beta_hat / se_beta if se_beta > 0 else np.nan
         t_d = delta_hat / se_delta if se_delta > 0 else np.nan
